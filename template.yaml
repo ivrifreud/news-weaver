@@ -32,6 +32,7 @@ Resources:
       Dockerfile: Dockerfile
     Properties:
       PackageType: Image
+      Architectures: [x86_64]
       ImageConfig:
         Command: ["lambda_pipeline.handler"]
       Policies:
@@ -54,6 +55,7 @@ Resources:
       Dockerfile: Dockerfile
     Properties:
       PackageType: Image
+      Architectures: [x86_64]
       ImageConfig:
         Command: ["lambda_bot.handler"]
       Policies:
