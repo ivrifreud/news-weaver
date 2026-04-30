@@ -9,9 +9,9 @@ Globals:
     Environment:
       Variables:
         STATE_BUCKET: !Ref StateBucket
-        ANTHROPIC_API_KEY: !Sub "{{resolve:ssm:/news-weaver/anthropic-api-key}}"
-        TELEGRAM_BOT_TOKEN: !Sub "{{resolve:ssm:/news-weaver/telegram-bot-token}}"
-        TELEGRAM_CHAT_ID: !Sub "{{resolve:ssm:/news-weaver/telegram-chat-id}}"
+        ANTHROPIC_API_KEY: !Sub "{{resolve:ssm-secure:/news-weaver/anthropic-api-key}}"
+        TELEGRAM_BOT_TOKEN: !Sub "{{resolve:ssm-secure:/news-weaver/telegram-bot-token}}"
+        TELEGRAM_CHAT_ID: !Sub "{{resolve:ssm-secure:/news-weaver/telegram-chat-id}}"
 
 Resources:
 
