@@ -4,7 +4,6 @@ Description: News Weaver — serverless news aggregator + Telegram bot
 
 Globals:
   Function:
-    PackageType: Image
     Timeout: 300       # 5 min — pipeline can take ~2 min on cold start
     MemorySize: 512
     Environment:
@@ -28,6 +27,7 @@ Resources:
   PipelineFunction:
     Type: AWS::Serverless::Function
     Properties:
+      PackageType: Image
       ImageConfig:
         Command: ["lambda_pipeline.handler"]
       Metadata:
@@ -49,6 +49,7 @@ Resources:
   BotFunction:
     Type: AWS::Serverless::Function
     Properties:
+      PackageType: Image
       ImageConfig:
         Command: ["lambda_bot.handler"]
       Metadata:
