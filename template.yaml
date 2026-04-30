@@ -26,14 +26,14 @@ Resources:
 
   PipelineFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      DockerTag: latest
+      DockerContext: .
+      Dockerfile: Dockerfile
     Properties:
       PackageType: Image
       ImageConfig:
         Command: ["lambda_pipeline.handler"]
-      Metadata:
-        DockerTag: latest
-        DockerContext: .
-        Dockerfile: Dockerfile
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref StateBucket
@@ -48,14 +48,14 @@ Resources:
 
   BotFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      DockerTag: latest
+      DockerContext: .
+      Dockerfile: Dockerfile
     Properties:
       PackageType: Image
       ImageConfig:
         Command: ["lambda_bot.handler"]
-      Metadata:
-        DockerTag: latest
-        DockerContext: .
-        Dockerfile: Dockerfile
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref StateBucket
