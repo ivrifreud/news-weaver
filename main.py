@@ -77,8 +77,15 @@ def run_pipeline(
     bot_app=None,
 ) -> None:
     """Fetch → cluster/score → route → push. Called by scheduler or --run-once."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     llm_client = LLMClient()
+
+    # Lambda mode: no running PTB loop — create a direct Bot for one-shot sends
+    direct_bot = None
+    if token and not bot_loop:
+        from telegram import Bot
+        direct_bot = Bot(token=token)
 
     logger.info("Pipeline started")
 
@@ -119,12 +126,19 @@ def run_pipeline(
             _save_profile(profile)
 
             if bot_loop and bot_app and chat_id:
+                # scheduler mode: send via long-lived PTB application thread
                 future = asyncio.run_coroutine_threadsafe(
                     send_notification(bot_app.bot, chat_id, event),
                     bot_loop,
                 )
                 try:
                     future.result(timeout=15)
+                except Exception as exc:
+                    logger.error("Telegram send failed: %s", exc)
+            elif direct_bot and chat_id:
+                # Lambda mode: no running loop, send directly via Bot API
+                try:
+                    asyncio.run(send_notification(direct_bot, chat_id, event))
                 except Exception as exc:
                     logger.error("Telegram send failed: %s", exc)
             else:
