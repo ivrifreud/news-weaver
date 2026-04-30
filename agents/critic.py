@@ -73,10 +73,11 @@ def _build_cluster_prompt(articles: List[RawArticle]) -> str:
         "<task>\n"
         "קבץ את הכותרות הבאות לפי האירוע האמיתי שהן מתארות.\n"
         "כל כתבה שייכת לקבוצה אחת בדיוק. החזר JSON תקין בלבד.\n"
+        "השתמש בפורמט קומפקטי — רשימת רשימות של אינדקסים בלבד, ללא שמות.\n"
         "</task>\n"
         f"<articles>\n{articles_json}\n</articles>\n"
         "<output_format>\n"
-        '{"clusters": [{"event_id": "<uuid>", "article_indices": [0, 2, 5]}, ...]}\n'
+        '{"clusters": [[0, 2, 5], [1, 3], [4], ...]}\n'
         "</output_format>"
     )
 
@@ -132,7 +133,7 @@ def _cluster_articles(
     prompt = _build_cluster_prompt(articles)
     raw = ""
     try:
-        raw = client.call(prompt, max_tokens=2000, model=HAIKU_MODEL)
+        raw = client.call(prompt, max_tokens=3000, model=HAIKU_MODEL)
         data = json.loads(_strip_fences(raw))
         clusters = data.get("clusters", [])
 
@@ -140,7 +141,11 @@ def _cluster_articles(
         groups: List[List[RawArticle]] = []
 
         for cluster in clusters:
-            indices = cluster.get("article_indices", [])
+            # Support both compact [[0,1,2],...] and legacy [{"article_indices":[...]},...] formats
+            if isinstance(cluster, list):
+                indices = cluster
+            else:
+                indices = cluster.get("article_indices", [])
             group: List[RawArticle] = []
             for idx in indices:
                 if isinstance(idx, int) and 0 <= idx < len(articles) and idx not in assigned:
