@@ -75,7 +75,7 @@ def _build_quick_score_prompt(groups: List[List[RawArticle]], profile: UserProfi
     }
     return (
         "<task>\n"
-        "דרג כל אשכול לפי רלוונטיות לפרופיל המשתמש (1.0-10.0). החזר JSON בלבד.\n"
+        "דרג כל אשכול לפי רלוונטיות לפרופיל המשתמש (1.0-10.0). החזר JSON תקין בלבד — ללא גדרות markdown.\n"
         "</task>\n"
         f"<clusters>\n{json.dumps(clusters_data, ensure_ascii=False)}\n</clusters>\n"
         f"<user_profile>\n{json.dumps(profile_data, ensure_ascii=False)}\n</user_profile>\n"
@@ -92,7 +92,7 @@ def _quick_score_clusters(
     prompt = _build_quick_score_prompt(groups, profile)
     raw = ""
     try:
-        raw = client.call(prompt, max_tokens=500, model=HAIKU_MODEL)
+        raw = client.call(prompt, max_tokens=1000, model=HAIKU_MODEL)
         data = json.loads(_strip_fences(raw))
         scores = data.get("scores", [])
         ranked = sorted(scores, key=lambda x: x.get("score", 0), reverse=True)
