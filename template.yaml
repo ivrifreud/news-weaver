@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: News Weaver — serverless news aggregator + Telegram bot
+
+Globals:
+  Function:
+    PackageType: Image
+    Timeout: 300       # 5 min — pipeline can take ~2 min on cold start
+    MemorySize: 512
+    Environment:
+      Variables:
+        STATE_BUCKET: !Ref StateBucket
+        ANTHROPIC_API_KEY: !Sub "{{resolve:ssm:/news-weaver/anthropic-api-key}}"
+        TELEGRAM_BOT_TOKEN: !Sub "{{resolve:ssm:/news-weaver/telegram-bot-token}}"
+        TELEGRAM_CHAT_ID: !Sub "{{resolve:ssm:/news-weaver/telegram-chat-id}}"
+
+Resources:
+
+  # ── S3 state bucket ────────────────────────────────────────────────────────
+
+  StateBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "news-weaver-state-${AWS::AccountId}"
+
+  # ── Pipeline Lambda (EventBridge daily trigger) ────────────────────────────
+
+  PipelineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      ImageConfig:
+        Command: ["lambda_pipeline.handler"]
+      Metadata:
+        DockerTag: latest
+        DockerContext: .
+        Dockerfile: Dockerfile
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref StateBucket
+      Events:
+        DailySchedule:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 7 * * ? *)"
+            Description: "Run news pipeline daily at 07:00 UTC"
+
+  # ── Bot Lambda (API Gateway webhook) ──────────────────────────────────────
+
+  BotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      ImageConfig:
+        Command: ["lambda_bot.handler"]
+      Metadata:
+        DockerTag: latest
+        DockerContext: .
+        Dockerfile: Dockerfile
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref StateBucket
+      Events:
+        WebhookApi:
+          Type: HttpApi
+          Properties:
+            Path: /webhook
+            Method: POST
+
+Outputs:
+  WebhookUrl:
+    Description: "Register this URL with Telegram setWebhook"
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/webhook"
+  StateBucketName:
+    Value: !Ref StateBucket

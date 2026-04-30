@@ -48,14 +48,14 @@ FEEDS: Dict[str, str] = {
 
 # Per-source article quotas (tune per tier as needed)
 FEED_LIMITS: Dict[str, int] = {
-    "ynet":            5,
-    "israel_hayom":    5,
-    "bbc_world":       5,
-    "the_economist":    3,
-    "foreign_affairs":  2,
-    "the_marker":       4,
-    "geektime":         3,
-    "mit_tech_review":  2,
+    "ynet":            10,
+    "israel_hayom":    10,
+    "bbc_world":       10,
+    "the_economist":    5,
+    "foreign_affairs":  3,
+    "the_marker":       8,
+    "geektime":         7,
+    "mit_tech_review":  5,
 }
 
 MAX_AGE_HOURS = 24

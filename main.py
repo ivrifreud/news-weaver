@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import os
 import sys
@@ -27,6 +26,7 @@ from agents.learner import build_application, process_feedback_queue
 from agents.router import route_event
 from agents.scout import fetch_all
 from models.schemas import UserProfile
+from services import storage
 from services.llm_client import LLMClient
 from services.telegram_bot import send_notification
 
@@ -46,24 +46,16 @@ _EVENTS_CACHE_PATH = "data/events_cache.json"
 # ---------------------------------------------------------------------------
 
 def _load_profile() -> UserProfile:
-    if os.path.exists(_PROFILE_PATH):
-        with open(_PROFILE_PATH, encoding="utf-8") as f:
-            return UserProfile.model_validate(json.load(f))
-    return UserProfile()
+    data = storage.read_json(_PROFILE_PATH, default={})
+    return UserProfile.model_validate(data) if data else UserProfile()
 
 
 def _save_profile(profile: UserProfile) -> None:
-    tmp = _PROFILE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(profile.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
-    os.replace(tmp, _PROFILE_PATH)
+    storage.write_json(_PROFILE_PATH, profile.model_dump(mode="json"))
 
 
 def _update_events_cache(events_cache: dict) -> None:
-    tmp = _EVENTS_CACHE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(events_cache, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, _EVENTS_CACHE_PATH)
+    storage.write_json(_EVENTS_CACHE_PATH, events_cache)
 
 
 def _reset_daily_count_if_needed() -> None:
@@ -107,10 +99,7 @@ def run_pipeline(
     events = process_articles(articles, profile, llm_client)
     logger.info("Produced %d events", len(events))
 
-    events_cache: dict = {}
-    if os.path.exists(_EVENTS_CACHE_PATH):
-        with open(_EVENTS_CACHE_PATH, encoding="utf-8") as f:
-            events_cache = json.load(f)
+    events_cache: dict = storage.read_json(_EVENTS_CACHE_PATH, default={})
 
     for event in sorted(events, key=lambda e: e.relevance_score, reverse=True):
         profile = _load_profile()  # re-read in case count changed
@@ -197,8 +186,6 @@ def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     bot_loop: Optional[asyncio.AbstractEventLoop] = None
     bot_app = None
-
-    os.makedirs("data", exist_ok=True)
 
     if token:
         logger.info("Starting Telegram bot…")

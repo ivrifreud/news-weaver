@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from filelock import FileLock
 from telegram import Update
 from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, ContextTypes
 
 from models.schemas import UserProfile
+from services import storage
 from services.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -20,7 +18,6 @@ logger = logging.getLogger(__name__)
 _PROFILE_PATH = "data/user_profile.json"
 _EVENTS_CACHE_PATH = "data/events_cache.json"
 _FEEDBACK_QUEUE_PATH = "data/feedback_queue.json"
-_LOCK_PATH = _PROFILE_PATH + ".lock"
 
 
 # ---------------------------------------------------------------------------
@@ -28,25 +25,17 @@ _LOCK_PATH = _PROFILE_PATH + ".lock"
 # ---------------------------------------------------------------------------
 
 def _load_profile(path: str = _PROFILE_PATH) -> UserProfile:
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            return UserProfile.model_validate(json.load(f))
-    return UserProfile()
+    data = storage.read_json(path, default={})
+    return UserProfile.model_validate(data) if data else UserProfile()
 
 
 def _save_profile(profile: UserProfile, path: str = _PROFILE_PATH) -> None:
-    """Atomic write: FileLock + temp file + os.replace()."""
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(profile.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    """Write profile via storage adapter (atomic locally, S3 put in Lambda)."""
+    storage.write_json(path, profile.model_dump(mode="json"))
 
 
 def _load_events_cache(path: str = _EVENTS_CACHE_PATH) -> dict:
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    return storage.read_json(path, default={})
 
 
 # ---------------------------------------------------------------------------
@@ -54,25 +43,14 @@ def _load_events_cache(path: str = _EVENTS_CACHE_PATH) -> dict:
 # ---------------------------------------------------------------------------
 
 def _enqueue_feedback(event_id: str, action: str) -> None:
-    """Append a feedback item to the persistent queue (atomic write)."""
-    queue: List[dict] = []
-    if os.path.exists(_FEEDBACK_QUEUE_PATH):
-        try:
-            with open(_FEEDBACK_QUEUE_PATH, encoding="utf-8") as f:
-                queue = json.load(f)
-        except Exception:
-            queue = []
-
+    """Append a feedback item to the persistent queue."""
+    queue: List[dict] = storage.read_json(_FEEDBACK_QUEUE_PATH, default=[]) or []
     queue.append({
         "event_id": event_id,
         "action": action,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
-
-    tmp = _FEEDBACK_QUEUE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(queue, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, _FEEDBACK_QUEUE_PATH)
+    storage.write_json(_FEEDBACK_QUEUE_PATH, queue)
     logger.debug("Enqueued %s for event %s", action, event_id)
 
 
@@ -81,58 +59,46 @@ def process_feedback_queue(
     cache_path: str = _EVENTS_CACHE_PATH,
     queue_path: str = _FEEDBACK_QUEUE_PATH,
 ) -> int:
-    """Drain the feedback queue, apply weight adjustments, return items processed."""
-    if not os.path.exists(queue_path):
-        return 0
+    """Drain the feedback queue, apply weight adjustments, return items processed.
 
-    try:
-        with open(queue_path, encoding="utf-8") as f:
-            queue: List[dict] = json.load(f)
-    except Exception as exc:
-        logger.warning("Could not read feedback queue: %s", exc)
-        return 0
-
+    Lambda invocations are isolated so no FileLock needed.
+    # TODO: use DynamoDB conditional writes if concurrent pipeline+bot overlap becomes an issue
+    """
+    queue: List[dict] = storage.read_json(queue_path, default=[]) or []
     if not queue:
         return 0
 
     events_cache = _load_events_cache(cache_path)
+    profile = _load_profile(profile_path)
 
-    with FileLock(_LOCK_PATH):
-        profile = _load_profile(profile_path)
+    for item in queue:
+        event_id = item.get("event_id", "")
+        action = item.get("action", "")
+        if not event_id or action not in ("like", "dislike"):
+            continue
 
-        for item in queue:
-            event_id = item.get("event_id", "")
-            action = item.get("action", "")
-            if not event_id or action not in ("like", "dislike"):
-                continue
+        is_positive = action == "like"
+        delta = 0.1 if is_positive else -0.1
 
-            is_positive = action == "like"
-            delta = 0.1 if is_positive else -0.1
+        signals = (profile.behavior_memory.positive_signals
+                   if is_positive else profile.behavior_memory.negative_signals)
+        if event_id not in signals:
+            signals.append(event_id)
 
-            signals = (profile.behavior_memory.positive_signals
-                       if is_positive else profile.behavior_memory.negative_signals)
-            if event_id not in signals:
-                signals.append(event_id)
+        event_data = events_cache.get(event_id, {})
+        keywords = (event_data.get("summary", "")
+                    if isinstance(event_data, dict) else str(event_data))
+        if keywords:
+            for interest in profile.interests:
+                if interest.topic in keywords:
+                    interest.weight = max(0.0, min(1.0, interest.weight + delta))
+                    logger.info(
+                        "Queue: adjusted '%s' by %+.1f → %.2f",
+                        interest.topic, delta, interest.weight,
+                    )
 
-            event_data = events_cache.get(event_id, {})
-            keywords = (event_data.get("summary", "")
-                        if isinstance(event_data, dict) else str(event_data))
-            if keywords:
-                for interest in profile.interests:
-                    if interest.topic in keywords:
-                        interest.weight = max(0.0, min(1.0, interest.weight + delta))
-                        logger.info(
-                            "Queue: adjusted '%s' by %+.1f → %.2f",
-                            interest.topic, delta, interest.weight,
-                        )
-
-        _save_profile(profile, profile_path)
-
-    # Clear the queue atomically
-    tmp = queue_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump([], f)
-    os.replace(tmp, queue_path)
+    _save_profile(profile, profile_path)
+    storage.write_json(queue_path, [])
 
     logger.info("Processed %d queued feedback items", len(queue))
     return len(queue)
