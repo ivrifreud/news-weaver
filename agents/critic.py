@@ -14,6 +14,8 @@ from services.llm_client import HAIKU_MODEL, LLMClient
 
 logger = logging.getLogger(__name__)
 
+SONNET_CANDIDATE_LIMIT = 12  # Haiku pre-scores all clusters; only top-N go to Sonnet
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,6 +57,61 @@ def _compute_prominence(sources: List[RawArticle]) -> dict:
         "top_headline_sources": top_headline_sources,
         "source_count": len(sources),
     }
+
+
+def _build_quick_score_prompt(groups: List[List[RawArticle]], profile: UserProfile) -> str:
+    """Prompt for Haiku to rank all cluster title-sets by relevance to user profile."""
+    clusters_data = [
+        {
+            "cluster_id": i,
+            "titles": [a.title for a in g],
+            "sources": list({a.source for a in g}),
+        }
+        for i, g in enumerate(groups)
+    ]
+    profile_data = {
+        "interests": [{"topic": intr.topic, "weight": intr.weight} for intr in profile.interests],
+        "avoid_topics": profile.avoid_topics,
+    }
+    return (
+        "<task>\n"
+        "דרג כל אשכול לפי רלוונטיות לפרופיל המשתמש (1.0-10.0). החזר JSON בלבד.\n"
+        "</task>\n"
+        f"<clusters>\n{json.dumps(clusters_data, ensure_ascii=False)}\n</clusters>\n"
+        f"<user_profile>\n{json.dumps(profile_data, ensure_ascii=False)}\n</user_profile>\n"
+        '<output_format>{"scores": [{"cluster_id": 0, "score": 7.5}, ...]}</output_format>'
+    )
+
+
+def _quick_score_clusters(
+    groups: List[List[RawArticle]], profile: UserProfile, client: LLMClient
+) -> List[int]:
+    """Return group indices sorted by Haiku quick-score, descending. Falls back to original order."""
+    if not groups:
+        return []
+    prompt = _build_quick_score_prompt(groups, profile)
+    raw = ""
+    try:
+        raw = client.call(prompt, max_tokens=500, model=HAIKU_MODEL)
+        data = json.loads(_strip_fences(raw))
+        scores = data.get("scores", [])
+        ranked = sorted(scores, key=lambda x: x.get("score", 0), reverse=True)
+        seen: set = set()
+        result: List[int] = []
+        for r in ranked:
+            idx = int(r["cluster_id"])
+            if 0 <= idx < len(groups) and idx not in seen:
+                result.append(idx)
+                seen.add(idx)
+        # append any missed indices at the end
+        for i in range(len(groups)):
+            if i not in seen:
+                result.append(i)
+        logger.info("[Critic/quick-score] Ranked %d clusters", len(result))
+        return result
+    except Exception as exc:
+        logger.warning("Quick-scoring failed (%s) — raw: %r — using original order", exc, raw)
+        return list(range(len(groups)))
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +160,7 @@ def _build_synthesis_and_score_prompt(
     return (
         "<task>\n"
         "אתה עורך חדשות. הכתבות עשויות להיות בעברית או באנגלית — הסיכום חייב להיות בעברית. בצע שלושה שלבים:\n"
-        "1. נתח את הכתבות בתגיות <thinking> (זהה את האירוע, זוויות שונות, חשיבות עיתונאית).\n"
+        "1. ניתוח קצר בתגיות <thinking> (2-3 משפטים בלבד: האירוע, זוויות מרכזיות, חשיבות).\n"
         "2. כתוב סיכום של 3-4 משפטים בעברית — כשynet ו-israel_hayom מכסים את אותו אירוע, ציין במפורש את הבדלי הפריימינג. ציין מקורות כותרת ראשית (top_headline_sources) כשרלוונטי.\n"
         "3. דרג רלוונטיות (1.0-10.0) בהתאם לפרופיל המשתמש ולחשיבות העיתונאית.\n"
         "פורמט חובה (אל תסטה ממנו):\n"
@@ -175,7 +232,7 @@ def _synthesize_and_score_cluster(
     prompt = _build_synthesis_and_score_prompt(articles, profile)
     raw = ""
     try:
-        raw = client.call(prompt, max_tokens=2500)
+        raw = client.call(prompt, max_tokens=1200)
 
         # Extract CoT thinking
         thinking, after_thinking = _extract_thinking(raw)
@@ -329,11 +386,20 @@ def _score_event(
 def process_articles(
     articles: List[RawArticle], profile: UserProfile, client: LLMClient
 ) -> List[ProcessedEvent]:
-    """Cluster, then synthesise+score each cluster — parallel Sonnet calls, 5 workers."""
+    """Cluster → Haiku quick-rank → Sonnet top-N only — parallel Sonnet calls, 5 workers."""
     if not articles:
         return []
 
     groups = _cluster_articles(articles, client)
+
+    # Two-tier: Haiku pre-ranks all clusters cheaply; Sonnet only processes top candidates
+    ranked_indices = _quick_score_clusters(groups, profile, client)
+    candidate_indices = ranked_indices[:SONNET_CANDIDATE_LIMIT]
+    candidates = [groups[i] for i in candidate_indices]
+    logger.info(
+        "Quick-scored %d clusters → passing top %d to Sonnet",
+        len(groups), len(candidates),
+    )
 
     def _process_group(group: List[RawArticle]) -> Optional[ProcessedEvent]:
         summary, thinking, score, score_reasoning = _synthesize_and_score_cluster(
@@ -359,7 +425,7 @@ def process_articles(
 
     events: List[ProcessedEvent] = []
     with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(_process_group, g): g for g in groups}
+        futures = {executor.submit(_process_group, g): g for g in candidates}
         for future in as_completed(futures):
             try:
                 event = future.result()

@@ -1,10 +1,12 @@
-"""Prompt eval — runs 3 fixed clusters and prints quality/cost metrics.
+"""Prompt eval — runs 3 fixed clusters + full snapshot and prints quality/cost metrics.
 
 Usage:
     python3 eval_critic.py
 
 Prints one summary block per cluster:
   cluster name | articles | API calls | tokens in/out | score | summary snippet
+
+Also runs the full articles snapshot through process_articles to measure real cost.
 """
 
 from __future__ import annotations
@@ -52,6 +54,10 @@ EVAL_CLUSTERS_INDICES = [
 SNAPSHOT_PATH = "data/articles_snapshot.json"
 PROFILE_PATH = "data/user_profile.json"
 
+HAIKU_COST_PER_TOKEN = 0.80 / 1_000_000
+SONNET_INPUT_COST    = 3.0  / 1_000_000
+SONNET_OUTPUT_COST   = 15.0 / 1_000_000
+
 
 def load_article(raw: dict) -> RawArticle:
     """Build a RawArticle from snapshot dict (adds position_in_feed=0 default)."""
@@ -63,6 +69,17 @@ def load_article(raw: dict) -> RawArticle:
         published_at=datetime.fromisoformat(raw["published_at"].replace("Z", "+00:00")),
         position_in_feed=raw.get("position_in_feed", 0),
     )
+
+
+def estimate_cost(usage_log: list) -> float:
+    """Estimate USD cost from usage log records."""
+    cost = 0.0
+    for u in usage_log:
+        if "haiku" in u["model"]:
+            cost += (u["input_tokens"] + u["output_tokens"]) * HAIKU_COST_PER_TOKEN
+        else:
+            cost += u["input_tokens"] * SONNET_INPUT_COST + u["output_tokens"] * SONNET_OUTPUT_COST
+    return cost
 
 
 def main() -> None:
@@ -80,7 +97,9 @@ def main() -> None:
     total_in = 0
     total_out = 0
     total_calls = 0
+    total_cost = 0.0
 
+    # ── Fixed cluster quality checks ─────────────────────────────────────────
     for cluster_def in EVAL_CLUSTERS_INDICES:
         client = LLMClient()
         articles = [load_article(all_articles_raw[i]) for i in cluster_def["indices"]]
@@ -94,16 +113,18 @@ def main() -> None:
         in_tok = sum(u["input_tokens"] for u in usage)
         out_tok = sum(u["output_tokens"] for u in usage)
         models_used = ", ".join(sorted({u["model"] for u in usage}))
+        cost = estimate_cost(usage)
 
         total_in += in_tok
         total_out += out_tok
         total_calls += calls
+        total_cost += cost
 
         print(f"  Cluster : {cluster_def['name']}")
         print(f"  Desc    : {cluster_def['desc']}")
         print(f"  Articles: {len(articles)} — {', '.join(a.title[:35] for a in articles)}")
         print(f"  Model(s): {models_used}")
-        print(f"  Calls   : {calls}  |  Tokens: {in_tok} in / {out_tok} out  |  {elapsed:.1f}s")
+        print(f"  Calls   : {calls}  |  Tokens: {in_tok} in / {out_tok} out  |  ${cost:.4f}  |  {elapsed:.1f}s")
 
         if events:
             e = events[0]
@@ -116,8 +137,38 @@ def main() -> None:
         print()
 
     print(f"{'─'*72}")
-    print(f"  TOTAL   : {total_calls} calls | {total_in} tokens in / {total_out} tokens out")
-    print(f"{'='*72}\n")
+    print(f"  FIXED CLUSTERS TOTAL: {total_calls} calls | {total_in} in / {total_out} out tokens | ${total_cost:.4f}")
+    print(f"{'─'*72}\n")
+
+    # ── Full snapshot run (real-scale cost measurement) ───────────────────────
+    print(f"  FULL SNAPSHOT RUN ({len(all_articles_raw)} articles)")
+    print(f"  {'─'*68}")
+    client_full = LLMClient()
+    all_articles = [load_article(r) for r in all_articles_raw]
+    t0 = time.time()
+    events_full = process_articles(all_articles, profile, client_full)
+    elapsed_full = time.time() - t0
+
+    usage_full = client_full.get_usage()
+    haiku_calls  = sum(1 for u in usage_full if "haiku" in u["model"])
+    sonnet_calls = sum(1 for u in usage_full if "sonnet" in u["model"])
+    full_in  = sum(u["input_tokens"]  for u in usage_full)
+    full_out = sum(u["output_tokens"] for u in usage_full)
+    full_cost = estimate_cost(usage_full)
+
+    print(f"  Articles in: {len(all_articles)} → Events out: {len(events_full)}")
+    print(f"  Haiku calls: {haiku_calls} | Sonnet calls: {sonnet_calls}")
+    print(f"  Tokens: {full_in} in / {full_out} out")
+    print(f"  Estimated cost: ${full_cost:.4f}")
+    print(f"  Elapsed: {elapsed_full:.1f}s")
+
+    if events_full:
+        top = sorted(events_full, key=lambda e: e.relevance_score, reverse=True)[:3]
+        print(f"\n  Top 3 events by score:")
+        for e in top:
+            print(f"    [{e.relevance_score:.1f}] {e.combined_summary[:80]}…")
+
+    print(f"\n{'='*72}\n")
 
 
 if __name__ == "__main__":

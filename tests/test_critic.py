@@ -249,6 +249,8 @@ class TestProcessArticles:
     def test_full_pipeline_single_cluster(self, mock_client, sample_articles, sample_profile):
         mock_client.call.side_effect = [
             json.dumps({"clusters": [{"event_id": "e1", "article_indices": [0, 1, 2]}]}),
+            # quick-score response (Haiku)
+            json.dumps({"scores": [{"cluster_id": 0, "score": 7.5}]}),
             # merged synthesis+score response
             "<thinking>ניתוח האירוע</thinking>\nנתניהו העיד היום בבית המשפט."
             '\n<score>{"relevance_score": 7.5, "reasoning": "רלוונטי לפוליטיקה"}</score>',
@@ -269,10 +271,12 @@ class TestProcessArticles:
                 {"event_id": "e1", "article_indices": [0, 1]},
                 {"event_id": "e2", "article_indices": [2]},
             ]}),
-            # Step 2a: merged synthesis+score cluster 1
+            # Step 2: quick-score response (Haiku)
+            json.dumps({"scores": [{"cluster_id": 0, "score": 9.0}, {"cluster_id": 1, "score": 6.0}]}),
+            # Step 3a: merged synthesis+score cluster 1
             "<thinking>פוליטיקה</thinking>\nנתניהו העיד."
             '\n<score>{"relevance_score": 9.0, "reasoning": "פוליטיקה חשובה"}</score>',
-            # Step 2b: merged synthesis+score cluster 2
+            # Step 3b: merged synthesis+score cluster 2
             "<thinking>כלכלה</thinking>\nמניות הטק עלו."
             '\n<score>{"relevance_score": 6.0, "reasoning": "כלכלה רלוונטית"}</score>',
         ]
@@ -284,6 +288,7 @@ class TestProcessArticles:
     def test_event_ids_are_valid_uuids(self, mock_client, sample_articles, sample_profile):
         mock_client.call.side_effect = [
             json.dumps({"clusters": [{"event_id": "e1", "article_indices": [0, 1, 2]}]}),
+            json.dumps({"scores": [{"cluster_id": 0, "score": 5.0}]}),
             '<thinking>t</thinking>\nסיכום.\n<score>{"relevance_score": 5.0, "reasoning": "ok"}</score>',
         ]
         events = process_articles(sample_articles, sample_profile, mock_client)
@@ -312,6 +317,7 @@ class TestProcessArticles:
     def test_reasoning_includes_thinking_and_score(self, mock_client, sample_articles, sample_profile):
         mock_client.call.side_effect = [
             json.dumps({"clusters": [{"event_id": "e1", "article_indices": [0]}]}),
+            json.dumps({"scores": [{"cluster_id": 0, "score": 8.0}]}),
             "<thinking>ניתוח עמוק</thinking>\nסיכום."
             '\n<score>{"relevance_score": 8.0, "reasoning": "הסבר ציון"}</score>',
         ]

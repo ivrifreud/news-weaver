@@ -54,7 +54,7 @@ FEED_LIMITS: Dict[str, int] = {
     "the_economist":    5,
     "foreign_affairs":  3,
     "the_marker":       8,
-    "geektime":         7,
+    "geektime":         6,
     "mit_tech_review":  5,
 }
 
