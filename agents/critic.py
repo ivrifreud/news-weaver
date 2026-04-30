@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
 from models.schemas import ProcessedEvent, RawArticle, UserProfile
@@ -131,7 +132,7 @@ def _cluster_articles(
     prompt = _build_cluster_prompt(articles)
     raw = ""
     try:
-        raw = client.call(prompt, max_tokens=600, model=HAIKU_MODEL)
+        raw = client.call(prompt, max_tokens=2000, model=HAIKU_MODEL)
         data = json.loads(_strip_fences(raw))
         clusters = data.get("clusters", [])
 
@@ -187,8 +188,14 @@ def _synthesize_and_score_cluster(
                 score = max(1.0, min(10.0, score))
                 score_reasoning = str(score_data.get("reasoning", ""))
             except Exception as parse_exc:
-                logger.warning("Score JSON parse failed (%s) — raw score block: %r",
-                               parse_exc, score_json_str)
+                # Regex fallback: Hebrew text can contain unescaped " (e.g. כטב"ם) breaking json.loads
+                m = re.search(r'"relevance_score"\s*:\s*(\d+(?:\.\d+)?)', score_json_str)
+                if m:
+                    score = max(1.0, min(10.0, float(m.group(1))))
+                logger.warning(
+                    "Score JSON parse failed (%s) — raw score block: %r — regex score: %.1f",
+                    parse_exc, score_json_str, score,
+                )
 
         if not summary:
             logger.warning("No summary extracted for cluster of %d articles", len(articles))
@@ -317,36 +324,44 @@ def _score_event(
 def process_articles(
     articles: List[RawArticle], profile: UserProfile, client: LLMClient
 ) -> List[ProcessedEvent]:
-    """Cluster, then synthesise+score each cluster in a single LLM call."""
+    """Cluster, then synthesise+score each cluster — parallel Sonnet calls, 5 workers."""
     if not articles:
         return []
 
     groups = _cluster_articles(articles, client)
-    events: List[ProcessedEvent] = []
 
-    for group in groups:
+    def _process_group(group: List[RawArticle]) -> Optional[ProcessedEvent]:
         summary, thinking, score, score_reasoning = _synthesize_and_score_cluster(
             group, profile, client
         )
-
         reasoning_parts = [p for p in (thinking, score_reasoning) if p]
         full_reasoning = (
             "\n\nציון: ".join(reasoning_parts)
             if len(reasoning_parts) > 1
             else (reasoning_parts[0] if reasoning_parts else "")
         )
-
         try:
-            event = ProcessedEvent(
+            return ProcessedEvent(
                 event_id=str(uuid.uuid4()),
                 combined_summary=summary,
                 relevance_score=score,
                 reasoning=full_reasoning,
                 sources=group,
             )
-            events.append(event)
         except Exception as exc:
             logger.error("Failed to build ProcessedEvent: %s", exc)
+            return None
+
+    events: List[ProcessedEvent] = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_process_group, g): g for g in groups}
+        for future in as_completed(futures):
+            try:
+                event = future.result()
+                if event is not None:
+                    events.append(event)
+            except Exception as exc:
+                logger.error("Synthesize+score thread failed: %s", exc)
 
     logger.info(
         "Produced %d processed events from %d articles", len(events), len(articles)
