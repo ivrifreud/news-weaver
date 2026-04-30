@@ -1,4 +1,4 @@
-"""Tests for agents/router.py — all boundary conditions for dynamic thresholds."""
+"""Tests for agents/router.py — top-10 daily push logic."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agents.router import log_to_daily_log, route_event, should_send_push
+from agents.router import DAILY_PUSH_LIMIT, log_to_daily_log, route_event, should_send_push
 from models.schemas import ProcessedEvent, PushManagement, RawArticle, UserProfile
 
 
@@ -39,91 +39,28 @@ def _make_profile(count: int) -> UserProfile:
 
 
 # ---------------------------------------------------------------------------
-# should_send_push — low count (< 6): threshold > 8.0
+# should_send_push — budget-based (count < DAILY_PUSH_LIMIT)
 # ---------------------------------------------------------------------------
 
-class TestThresholdLowCount:
-    def test_score_exactly_at_threshold_rejected(self):
-        assert should_send_push(_make_event(8.0), _make_profile(0)) is False
+class TestShouldSendPush:
+    def test_accepted_when_count_zero(self):
+        assert should_send_push(_make_event(1.0), _make_profile(0)) is True
 
-    def test_score_just_above_threshold_accepted(self):
-        assert should_send_push(_make_event(8.01), _make_profile(0)) is True
+    def test_accepted_any_score_within_budget(self):
+        assert should_send_push(_make_event(1.0), _make_profile(5)) is True
 
-    def test_score_well_above_threshold_accepted(self):
-        assert should_send_push(_make_event(9.9), _make_profile(5)) is True
+    def test_accepted_at_count_just_below_limit(self):
+        assert should_send_push(_make_event(1.0), _make_profile(DAILY_PUSH_LIMIT - 1)) is True
 
-    def test_count_5_still_uses_low_threshold(self):
-        assert should_send_push(_make_event(8.5), _make_profile(5)) is True
+    def test_rejected_at_daily_limit(self):
+        assert should_send_push(_make_event(10.0), _make_profile(DAILY_PUSH_LIMIT)) is False
 
-    def test_count_5_score_at_threshold_rejected(self):
-        assert should_send_push(_make_event(8.0), _make_profile(5)) is False
+    def test_rejected_above_daily_limit(self):
+        assert should_send_push(_make_event(10.0), _make_profile(DAILY_PUSH_LIMIT + 5)) is False
 
-
-# ---------------------------------------------------------------------------
-# should_send_push — mid count (6–10): threshold > 9.0
-# ---------------------------------------------------------------------------
-
-class TestThresholdMidCount:
-    def test_count_6_score_below_new_threshold_rejected(self):
-        # score 8.5 passed at count=5 but must fail at count=6
-        assert should_send_push(_make_event(8.5), _make_profile(6)) is False
-
-    def test_count_6_score_exactly_at_threshold_rejected(self):
-        assert should_send_push(_make_event(9.0), _make_profile(6)) is False
-
-    def test_count_6_score_just_above_threshold_accepted(self):
-        assert should_send_push(_make_event(9.01), _make_profile(6)) is True
-
-    def test_count_10_score_above_threshold_accepted(self):
-        assert should_send_push(_make_event(9.5), _make_profile(10)) is True
-
-    def test_count_10_score_at_threshold_rejected(self):
-        assert should_send_push(_make_event(9.0), _make_profile(10)) is False
-
-    def test_boundary_count_5_vs_6(self):
-        """Score 8.5 passes at count=5 but fails at count=6."""
-        assert should_send_push(_make_event(8.5), _make_profile(5)) is True
-        assert should_send_push(_make_event(8.5), _make_profile(6)) is False
-
-
-# ---------------------------------------------------------------------------
-# should_send_push — high count (11–14): threshold > 9.5
-# ---------------------------------------------------------------------------
-
-class TestThresholdHighCount:
-    def test_count_11_score_below_mid_threshold_rejected(self):
-        assert should_send_push(_make_event(9.0), _make_profile(11)) is False
-
-    def test_count_11_score_exactly_at_threshold_rejected(self):
-        assert should_send_push(_make_event(9.5), _make_profile(11)) is False
-
-    def test_count_11_score_just_above_threshold_accepted(self):
-        assert should_send_push(_make_event(9.51), _make_profile(11)) is True
-
-    def test_count_14_score_max_accepted(self):
-        assert should_send_push(_make_event(9.99), _make_profile(14)) is True
-
-    def test_boundary_count_10_vs_11(self):
-        """Score 9.1 passes at count=10 but fails at count=11."""
-        assert should_send_push(_make_event(9.1), _make_profile(10)) is True
-        assert should_send_push(_make_event(9.1), _make_profile(11)) is False
-
-
-# ---------------------------------------------------------------------------
-# should_send_push — daily limit reached (>= 15): always False
-# ---------------------------------------------------------------------------
-
-class TestDailyLimit:
-    def test_count_15_always_rejected(self):
-        assert should_send_push(_make_event(10.0), _make_profile(15)) is False
-
-    def test_count_exceeded_rejected(self):
-        assert should_send_push(_make_event(10.0), _make_profile(20)) is False
-
-    def test_boundary_count_14_vs_15(self):
-        """Score 9.99 passes at count=14 but fails at count=15."""
-        assert should_send_push(_make_event(9.99), _make_profile(14)) is True
-        assert should_send_push(_make_event(9.99), _make_profile(15)) is False
+    def test_boundary_one_below_vs_at_limit(self):
+        assert should_send_push(_make_event(5.0), _make_profile(DAILY_PUSH_LIMIT - 1)) is True
+        assert should_send_push(_make_event(5.0), _make_profile(DAILY_PUSH_LIMIT)) is False
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +92,7 @@ class TestLogToDailyLog:
             log_to_daily_log(_make_event(5.0), log_path=path)
             with open(path, encoding="utf-8") as f:
                 content = f.read()
-        assert "סיכום לבדיקה" in content  # Hebrew text preserved
+        assert "סיכום לבדיקה" in content
 
 
 # ---------------------------------------------------------------------------
@@ -163,24 +100,32 @@ class TestLogToDailyLog:
 # ---------------------------------------------------------------------------
 
 class TestRouteEvent:
-    def test_returns_true_when_should_push(self):
+    def test_returns_true_within_budget(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "daily_log.json")
-            result = route_event(_make_event(9.0), _make_profile(0), log_path=path)
+            result = route_event(_make_event(5.0), _make_profile(0), log_path=path)
         assert result is True
 
-    def test_returns_false_and_logs_below_limit(self):
+    def test_returns_false_and_logs_when_budget_exhausted(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "daily_log.json")
-            result = route_event(_make_event(5.0), _make_profile(3), log_path=path)
+            result = route_event(_make_event(9.9), _make_profile(DAILY_PUSH_LIMIT), log_path=path)
             assert result is False
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
         assert len(data) == 1
 
-    def test_returns_false_and_does_not_log_at_daily_limit(self):
+    def test_top_10_all_sent(self):
+        """First 10 events pushed, 11th logged."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "daily_log.json")
-            result = route_event(_make_event(10.0), _make_profile(15), log_path=path)
-            assert result is False
-            assert not os.path.exists(path)  # no log file created
+            pushed = 0
+            for i in range(11):
+                profile = _make_profile(pushed)
+                result = route_event(_make_event(max(1.0, min(10.0, float(10 - i) + 1))), profile, log_path=path)
+                if result:
+                    pushed += 1
+            assert pushed == DAILY_PUSH_LIMIT
+            with open(path, encoding="utf-8") as f:
+                logged = json.load(f)
+        assert len(logged) == 1

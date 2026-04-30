@@ -1,4 +1,4 @@
-"""Node 3 — The Router: dynamic thresholding + daily log."""
+"""Node 3 — The Router: send top 10 events by relevance score, log the rest."""
 
 from __future__ import annotations
 
@@ -12,21 +12,12 @@ from models.schemas import ProcessedEvent, UserProfile
 logger = logging.getLogger(__name__)
 
 _DEFAULT_LOG_PATH = "data/daily_log.json"
+DAILY_PUSH_LIMIT = 10
 
 
 def should_send_push(event: ProcessedEvent, profile: UserProfile) -> bool:
-    """Return True if event should trigger a push notification."""
-    count = profile.push_management.current_count
-    score = event.relevance_score
-
-    if count >= 15:
-        return False
-    elif count >= 11:
-        return score > 9.5
-    elif count >= 6:
-        return score > 9.0
-    else:
-        return score > 8.0
+    """Return True if daily push budget not yet exhausted."""
+    return profile.push_management.current_count < DAILY_PUSH_LIMIT
 
 
 def log_to_daily_log(event: ProcessedEvent, log_path: str = _DEFAULT_LOG_PATH) -> None:
@@ -58,15 +49,11 @@ def route_event(
     profile: UserProfile,
     log_path: str = _DEFAULT_LOG_PATH,
 ) -> bool:
-    """Decide push vs. log. Returns True if notification should be sent."""
-    count = profile.push_management.current_count
-
-    if count >= 15:
-        logger.info("Daily limit reached — event %s dropped", event.event_id)
-        return False
-
+    """Push if within top-10 budget, otherwise log. Returns True if pushed."""
     if should_send_push(event, profile):
-        logger.info("Pushing event %s (score=%.2f)", event.event_id, event.relevance_score)
+        logger.info("Pushing event %s (score=%.2f, count=%d/%d)",
+                    event.event_id, event.relevance_score,
+                    profile.push_management.current_count + 1, DAILY_PUSH_LIMIT)
         return True
 
     log_to_daily_log(event, log_path=log_path)

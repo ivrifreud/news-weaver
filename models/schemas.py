@@ -45,7 +45,7 @@ class PushManagement(BaseModel):
 
     model_config = ConfigDict(strict=True)
 
-    daily_limit: int = 15
+    daily_limit: int = 10
     current_count: int = 0
     dynamic_threshold: float = 8.0
     last_reset_date: Optional[str] = None  # ISO date YYYY-MM-DD, UTC
