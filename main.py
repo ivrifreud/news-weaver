@@ -81,11 +81,7 @@ def run_pipeline(
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     llm_client = LLMClient()
 
-    # Lambda mode: no running PTB loop — create a direct Bot for one-shot sends
-    direct_bot = None
-    if token and not bot_loop:
-        from telegram import Bot
-        direct_bot = Bot(token=token)
+    lambda_mode = bool(token and not bot_loop)
 
     logger.info("Pipeline started")
 
@@ -135,10 +131,16 @@ def run_pipeline(
                     future.result(timeout=15)
                 except Exception as exc:
                     logger.error("Telegram send failed: %s", exc)
-            elif direct_bot and chat_id:
-                # Lambda mode: no running loop, send directly via Bot API
+            elif lambda_mode and chat_id:
+                # Lambda mode: fresh Bot per send so each asyncio.run() gets
+                # a clean HTTP session (reusing one Bot across asyncio.run()
+                # calls closes the session after the first invocation)
+                async def _send(tok: str, cid: str, ev=event) -> None:
+                    from telegram import Bot
+                    async with Bot(token=tok) as bot:
+                        await send_notification(bot, cid, ev)
                 try:
-                    asyncio.run(send_notification(direct_bot, chat_id, event))
+                    asyncio.run(_send(token, chat_id))
                 except Exception as exc:
                     logger.error("Telegram send failed: %s", exc)
             else:
