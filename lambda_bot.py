@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-from typing import Optional
 
 import certifi
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
@@ -20,27 +19,31 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-from telegram import Update
-from agents.learner import build_application
+from telegram import Bot, Update
+from agents.learner import handle_expand, handle_feedback
 
 logger = logging.getLogger(__name__)
 
-# Module-level app — reused across warm Lambda invocations
-_app = None
-
 
 async def _process(body: str) -> None:
-    global _app
-    if _app is None:
-        token = os.environ["TELEGRAM_BOT_TOKEN"]
-        _app = build_application(token)
-        await _app.initialize()
-        await _app.start()
-        logger.info("PTB Application initialized")
-
     data = json.loads(body)
-    update = Update.de_json(data, _app.bot)
-    await _app.process_update(update)
+    if not data.get("update_id"):
+        logger.warning("No update_id in body — skipping (not a Telegram update)")
+        return
+
+    bot = Bot(token=os.environ["TELEGRAM_BOT_TOKEN"])
+    update = Update.de_json(data, bot)
+    if not update or not update.callback_query:
+        logger.debug("Update has no callback_query — nothing to handle")
+        return
+
+    callback_data = update.callback_query.data or ""
+    if callback_data.startswith(("like:", "dislike:")):
+        await handle_feedback(update, None)
+    elif callback_data.startswith("expand:"):
+        await handle_expand(update, None)
+    else:
+        logger.warning("Unhandled callback_data: %s", callback_data)
 
 
 def handler(event: dict, context: object) -> dict:
@@ -50,5 +53,5 @@ def handler(event: dict, context: object) -> dict:
         asyncio.run(_process(body))
     except Exception as exc:
         logger.error("Failed to process update: %s", exc)
-        # Return 200 always — Telegram retries on non-2xx, causing duplicate processing
+        # Always return 200 — Telegram retries on non-2xx causing duplicates
     return {"statusCode": 200, "body": "ok"}
